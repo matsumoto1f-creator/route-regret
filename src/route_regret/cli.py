@@ -8,6 +8,8 @@ from route_regret.bench import break_even_verify_rate, reference_model, referenc
 from route_regret.fixture import MIXES, REGISTRY, WorkloadSpec, build_workload
 from route_regret.metrics import by_stratum, score, self_agreement_ceiling
 from route_regret.policies import Oracle, AlwaysTop, ThresholdLadder
+
+UNBOUNDED_TPM = 10 ** 9
 from route_regret.report import DEFAULT_LADDER, bench_mix, mix_invariance_table, spread
 
 
@@ -98,6 +100,118 @@ def cmd_arithmetic(args) -> int:
     return 0
 
 
+def cmd_classify(args) -> int:
+    """The classifier as ONE ENTRANT, not the product."""
+    from route_regret.classifier import CostSensitiveRouter, faceoff, train
+    # train() takes the EVALUATION spec and derives a disjoint training workload from
+    # seed_tag. It refuses if the two tags match, because identical case ids make
+    # held-out accuracy a lookup -- a guard that caught this call site being written
+    # backwards.
+    test_spec = WorkloadSpec(mix=args.mix, n=args.n, seed_tag="test")
+    cases = build_workload(test_spec)
+    ref = references(cases, test_spec)
+    from route_regret.report import tune_to_tau
+
+    ensemble = train(test_spec, n=args.n, seed_tag="train")
+    print(f"\ntrained on n={args.n} (seed_tag=train), scored on a DISJOINT n={args.n} "
+          f"(seed_tag=test)\n")
+    for card in REGISTRY[:2]:
+        print("  " + str(ensemble.report(card, cases, test_spec)).replace("\n", "\n  "))
+    # Computed, not typed. Writing the illustrative numbers by hand is how a narration
+    # line becomes an argument wearing a result's clothes.
+    r0 = ensemble.report(REGISTRY[0], cases, test_spec)
+    print(f"\n  Never a bare accuracy scalar: {r0.accuracy:.0%} against a "
+          f"{r0.majority_baseline:.0%} majority class is a kappa of {r0.kappa:.2f}, and"
+          "\n  the two off-diagonal cells are not the same mistake.\n")
+
+    clf, clf_led = tune_to_tau(
+        lambda off: CostSensitiveRouter(ensemble, offset=off), cases, test_spec,
+        ref, args.delta, args.verify)
+    hand, hand_led = tune_to_tau(
+        lambda off: ThresholdLadder(DEFAULT_LADDER, offset=off), cases, test_spec,
+        ref, args.delta, args.verify)
+    for led in (clf_led, hand_led):
+        print(score(led, ref, delta=args.delta).line())
+    f = faceoff(clf_led, hand_led, cases, ref, delta=args.delta,
+                challenger="classifier", incumbent="threshold_ladder")
+    print(f"\n  classifier over the hand rule: {100*f.point:+.1f}pp "
+          f"[{100*f.low:+.1f}, {100*f.high:+.1f}] at matched quality")
+    print("  A trained model that cannot beat two thresholds means the training set was"
+          "\n  ceremony. See tests/test_classifier.py for where that margin comes from —"
+          "\n  most of it is features the hand rule was never given, not the fitting.")
+    return 0
+
+
+def cmd_offpolicy(args) -> int:
+    """Estimate a policy you did not run, from logs of the one you did."""
+    from route_regret.classifier import CostSensitiveRouter, train
+    from route_regret.offpolicy import EpsilonExploring, measure_coverage
+
+    print(f"\nMeasuring INTERVAL COVERAGE over {args.seeds} independent workloads.")
+    print("The headline is not a point estimate — it is whether a nominal 95% interval")
+    print("actually contains the truth 95% of the time. Truth comes from running the")
+    print("candidate for real on a large disjoint draw.\n")
+    rep = measure_coverage(
+        lambda: EpsilonExploring(ThresholdLadder(DEFAULT_LADDER), 0.15),
+        lambda: ThresholdLadder(DEFAULT_LADDER, offset=0.12),
+        seeds=args.seeds, n=args.n, nominal=0.95)
+    iv = rep.coverage_interval()
+    verdict = ("CALIBRATED" if iv.low <= rep.nominal <= iv.high
+               else "UNDER-covering" if rep.covered_fraction < rep.nominal
+               else "OVER-covering")
+    print(f"  nominal {rep.nominal:.0%}  ->  measured {rep.covered_fraction:.1%} "
+          f"[{iv.low:.1%}, {iv.high:.1%}]   {verdict}")
+    print(f"  intervals are {rep.implied_width_scale:.2f}x the width that would hit "
+          f"nominal exactly")
+    print(f"  mean width {rep.mean_width:.1%}   mean |error| {rep.mean_absolute_error:.1%}")
+    print(f"  reweighting leaves {rep.mean_n_effective:.0f} of {rep.n} effective "
+          f"observations ({rep.mean_n_effective/rep.n:.1%} of the log survives)")
+    print(f"  same point estimate, Wilson at the RAW n -> covers "
+          f"{rep.naive_covered_fraction:.1%}")
+    print(f"\n  That last line is the control. Wilson at the raw row count is the obvious"
+          f"\n  thing to write, and it undercovers by "
+          f"{100*(rep.covered_fraction - rep.naive_covered_fraction):.0f} points. The"
+          f"\n  effective-sample discount is doing all the work.")
+    print(f"\n  Truth is not a formula: the candidate was actually run on {rep.truth_n:,} "
+          f"independent\n  cases, disjoint from every estimation draw.")
+    return 0
+
+
+def cmd_gateway(args) -> int:
+    """Composition with llm-gateway: this repo chooses, the gateway serves."""
+    from route_regret.gateway import (Deployment, attribute, audit_shed_load, evaluable)
+
+    spec = WorkloadSpec(mix=args.mix, n=args.n)
+    cases = build_workload(spec)
+    policy = ThresholdLadder(DEFAULT_LADDER)
+
+    print("\n--- attribution under a provider outage ---\n")
+    dep = Deployment.build(outages={"anthropic": [(0.0, 1e9)]})
+    calls = dep.serve(cases, policy, spec)
+    print("  filed against the model that actually RAN (correct):")
+    for a in attribute(calls, key="served").values():
+        print("    " + a.line())
+    print("\n  filed against the model the router REQUESTED (the defect):")
+    for a in attribute(calls, key="requested").values():
+        print("    " + a.line())
+    ev = evaluable(calls)
+    print(f"\n  {ev.line()}")
+    print("  A substituted request cannot evaluate the choice that was not honoured.")
+
+    print("\n--- the shed-load trap ---\n")
+    audit = audit_shed_load(
+        lambda squeezed: Deployment.build(
+            team_tokens_per_minute=8000 if squeezed else UNBOUNDED_TPM),
+        cases, policy, spec)
+    for line in audit.lines():
+        print("  " + line)
+    print(f"\n  naive saving {audit.naive_saving:+.1%} — which is the shed rate wearing a"
+          f"\n  dollar sign. Replaying the survivors against an unsqueezed deployment"
+          f"\n  reproduces the squeezed spend exactly: matched saving "
+          f"{audit.matched_saving:+.1%}.")
+    return 0
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="route-regret",
                                 description="A bench for LLM routing policies.")
@@ -107,13 +221,18 @@ def main(argv=None) -> int:
         ("mixes", cmd_mixes, "what each metric does when only the traffic changes"),
         ("strata", cmd_strata, "FASC per difficulty decile — the mix-invariant view"),
         ("arithmetic", cmd_arithmetic, "the fixture-independent identities"),
+        ("classify", cmd_classify, "the trained classifier as one entrant on the bench"),
+        ("offpolicy", cmd_offpolicy, "measured coverage of the off-policy estimator"),
+        ("gateway", cmd_gateway, "attribution and shed-load, composed with llm-gateway"),
     ):
         s = sub.add_parser(name, help=helptext)
         s.set_defaults(func=fn)
         s.add_argument("--n", type=int, default=8000)
         s.add_argument("--delta", type=float, default=0.03)
         s.add_argument("--verify", type=float, default=0.05)
-        if name in ("bench", "strata"):
+        if name in ("bench", "strata", "classify", "gateway"):
             s.add_argument("--mix", default="balanced", choices=list(MIXES))
+        if name == "offpolicy":
+            s.add_argument("--seeds", type=int, default=120)
     args = p.parse_args(argv)
     return args.func(args)

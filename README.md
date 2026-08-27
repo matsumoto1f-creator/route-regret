@@ -175,11 +175,96 @@ Real dependencies, not decorative ones:
   the cost ledger, admission. That gateway routes on **failure**; this routes on
   **content**. The seam: this chooses a model, the gateway serves it.
 
+## The classifier is an entrant, not the product
+
+```bash
+route-regret classify
+```
+
+Trained on **adequacy** — did the cheap model actually produce an acceptable answer —
+never on a human's impression of complexity. That matters because a person hand-labelling
+has only the prompt's surface to go on, which are precisely the features the classifier
+reads, so the labels become a function of the features and the model merely recovers the
+labeller's own rule. In the suite that circular label scores **99.4%** against **88.0%**
+for the honest target: a 20x lower error rate, carrying no information about any model.
+
+Never a bare accuracy scalar. Every figure ships with its majority-class baseline, its
+kappa, and the two off-diagonal cells with Wilson intervals — because 88% against a 66%
+majority is a kappa of 0.73, and under-routing and over-routing are not the same mistake:
+
+```
+gpt-4o-mini: 88.1% accurate against a 65.3% majority class -> kappa 0.736 (n=2500).
+             under-routing 8.5% [7.3%, 10.0%]; over-routing 18.2% [15.8%, 20.9%]
+```
+
+The decision rule is a per-case Lagrangian argmin on `price + λ·P(inadequate)`, not
+argmax. Same fitted model, two losses, accuracy identical by construction: the
+cost-sensitive rule is worth **+7.5 FASC points [+5.5, +9.7]**.
+
+Against the two-cut hand rule at matched quality it wins by **+17.0pp [+14.5, +19.7]** —
+but the suite is explicit about where that comes from. Restricted to the *same single
+feature* the hand rule reads, the margin's sign flips across exploration draws. Most of
+the win is features the hand rule was never given, not the fitting.
+
+## Estimating a policy you did not run
+
+```bash
+route-regret offpolicy
+```
+
+The headline is not a point estimate — it is whether a nominal 95% interval actually
+contains the truth 95% of the time, with truth taken from running the candidate for real
+on 200,000 independent cases:
+
+```
+nominal 95%  ->  measured 95.0% [83.5%, 98.6%]   CALIBRATED
+reweighting leaves 33 of 500 effective observations (6.7% of the log survives)
+same point estimate, Wilson at the RAW n -> covers 27.5%
+```
+
+**That last line is the control.** Wilson at the raw row count — the obvious thing to
+write — undercovers by 68 points. The effective-sample discount is doing all the work.
+
+Cost is a closed-form plug-in, not an importance-weighted estimate: exact to `7.1e-15`
+against actually running the policy, with an interval **3.95x tighter** than IPS of the
+same quantity. Only the quality estimand needs propensities. Positivity is checked rather
+than assumed — under a deterministic logger the estimator **refuses 6 of 7 candidates**
+and says so, instead of returning a number no reweighting could support.
+
+## Composed with llm-gateway
+
+```bash
+route-regret gateway
+```
+
+This repo chooses a model; [llm-gateway](https://github.com/matsumoto1f-creator/llm-gateway)
+serves it. Two failures that only appear once they are composed:
+
+**Attribution.** Under a provider outage the gateway substitutes. File the quality
+outcome against the model the router *requested* and the record inverts the ladder —
+`haiku-4.5` reads 88.6% and `opus-5` reads 18.9%, and **neither model ran at all**. The
+pooled average sees nothing (p=0.64) because the distortions have opposite signs. Quality
+is attributed to `Served.model_served`, and substituted requests are excluded from policy
+evaluation entirely: you cannot evaluate a choice that was not honoured.
+
+**Shed load.** Under a capacity squeeze a naive dashboard divides spend by *intended*
+requests and reports a triumph:
+
+```
+naive saving    +91.5%   (spend / intended requests)
+matched saving   +0.0%   (spend / served requests, versus the same requests unsqueezed)
+shed rate       +89.7%   (538 of 600 never served)
+```
+
+The 91.5% is the shed rate wearing a dollar sign. Replaying the survivors against an
+unsqueezed deployment reproduces the squeezed spend to the cent.
+
 ## Status
 
-Built: the fixture, the bench, the four-kind ledger, the reference policies, the
-mix-invariance and per-stratum harnesses, the arithmetic identities. 16 tests.
+All six phases built. **65 tests**, runs from a fresh clone with no API key.
 
-Not built yet: the trained classifier as a bench entrant (it is one competitor here, not
-the product), off-policy evaluation from logged propensities, and the llm-gateway
-composition.
+Known caveat, found while building phase 3 and not yet resolved: `tune_to_tau` bisects to
+the *cheapest admissible* point, so a tuned policy sits on the constraint by construction
+and a one-sided non-inferiority bound can never clear −δ at any n. That is a property of
+the tuning protocol, not of the fixture, and it is the argument for tuning to a bound
+rather than to a point estimate. Every FASC figure here carries it.
