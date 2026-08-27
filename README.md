@@ -45,7 +45,7 @@ The mechanism is simple once seen: a router that routes badly sends the long, ex
 prompts to the cheap model, and books a larger saving for it.
 
 ```bash
-route-regret bench
+route-regret bench --n 6000
 ```
 
 ```
@@ -61,6 +61,10 @@ content_blind            82.3352      17.2%       11.4%            19.7%
 `always_cheapest` — no routing logic whatsoever — **wins the naive metric outright at
 88.2%**, while failing 63% of requests. Any system tuned to that number learns to stop
 routing.
+
+Costs scale with `--n`; the ratios do not. Every figure in this README is from
+`--n 6000` unless stated, and reruns reproduce to the cent because the fixture is a
+pure function of `(case_id, model)`.
 
 ## What actually fixes it, and it is not a better metric
 
