@@ -1,0 +1,37 @@
+[project]
+name = "route-regret"
+version = "0.1.0"
+description = "A bench for LLM routing policies. Reports where a policy sits between always-frontier and a clairvoyant oracle, at a pinned quality constraint — because the obvious cost metric is anti-correlated with routing correctly."
+requires-python = ">=3.11"
+# The core runs the whole bench offline with no API key: a capability-graded fixture,
+# deterministic per (case_id, model), no RNG state and no clock. The statistics come
+# from sibling repos rather than being hand-rolled here — an interval computed twice
+# is an interval that disagrees with itself eventually.
+dependencies = [
+    "pydantic>=2.7",
+    "numpy>=1.26",
+    "prompt-experiments @ git+https://github.com/matsumoto1f-creator/prompt-experiments.git",
+    "ai-feature-flags @ git+https://github.com/matsumoto1f-creator/ai-feature-flags.git",
+]
+
+[project.optional-dependencies]
+classifier = ["scikit-learn>=1.4"]
+gateway = ["llm-gateway @ git+https://github.com/matsumoto1f-creator/llm-gateway.git"]
+api = ["fastapi>=0.110", "uvicorn>=0.29"]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+route-regret = "route_regret.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/route_regret"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
