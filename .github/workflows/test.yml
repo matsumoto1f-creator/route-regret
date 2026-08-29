@@ -1,0 +1,62 @@
+name: test
+on:
+  push: {branches: [main]}
+  pull_request:
+  workflow_dispatch:
+permissions: {contents: read}
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      # Matching the six sibling repos on @v4/@v5 rather than SHA-pinning. These are
+      # first-party actions/* and the tag is a different risk profile from a package
+      # registry dependency — which is the one that actually took a production deploy
+      # down here on 2026-08-27, via an unpinned `npx`. Named so the choice is a
+      # decision rather than a default.
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+
+      # The extras are not optional for the suite: the classifier needs scikit-learn and
+      # the composition tests need llm-gateway. Installing only [dev] would collect 46
+      # tests instead of 65 and still report green.
+      - run: pip install -e ".[dev,classifier,gateway]"
+      - run: pytest -q
+
+      # Below: the claims the README makes, re-run on every push. A README number that
+      # nothing re-checks is a number that was true once.
+      - name: the arithmetic that does not depend on the fixture
+        run: route-regret arithmetic
+
+      - name: the naive metric is won by the router that does not route
+        run: route-regret bench --n 4000
+
+      - name: neither metric is mix-invariant, and by how much
+        run: route-regret mixes --n 3000
+
+      # The suite must be able to go red, not merely be green. Break the coupling that
+      # makes the headline finding true and the test that guards it has to fail.
+      - name: prove the anti-correlation test can fail
+        run: |
+          python - <<'PY'
+          import pathlib, subprocess, sys
+          p = pathlib.Path("src/route_regret/fixture.py")
+          original = p.read_text()
+          # Sever the length/difficulty coupling: harder prompts stop being longer, so a
+          # router that routes badly no longer books a bigger saving.
+          p.write_text(original.replace(
+              "length_signal = spec.leakage * d + (1.0 - spec.leakage) * noise",
+              "length_signal = noise  # MUTANT"))
+          try:
+              r = subprocess.run(
+                  [sys.executable, "-m", "pytest", "-q", "-x",
+                   "tests/test_metric_honesty.py::test_at_a_fixed_operating_point_every_cost_metric_rewards_the_worse_router"],
+                  capture_output=True, text=True)
+          finally:
+              p.write_text(original)
+          if r.returncode == 0:
+              print(r.stdout[-2000:])
+              sys.exit("FAIL: the guard passed against a fixture with no coupling — "
+                       "it is not testing what it claims to test")
+          print("ok: severing the coupling turns the guard red, as it must")
+          PY
